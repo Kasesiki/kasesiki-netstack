@@ -5,23 +5,23 @@ use smoltcp::phy::{Device, RxToken, TxToken};
 
 
 pub struct VirtualDevice {
-    /// 接收过滤后的frame
+    /// 接收过滤后的frame并交给smoltcp处理
     in_buf: Receiver<Bytes>,
 
-    /// 将数据发送到tun
+    /// 将smoltcp处理后的数据发送到tun
     out_buf: UnboundedSender<Bytes>,
 }
 
 impl VirtualDevice {
     pub fn new(
-        iface_egress_tx: UnboundedSender<Bytes>,
+        stack_tx: UnboundedSender<Bytes>,
     ) -> (Self, Sender<Bytes>) {
         
         let (iface_ingress_tx, iface_ingress_rx) = futures::channel::mpsc::channel(10);
         (
             Self {
                 in_buf: iface_ingress_rx,
-                out_buf: iface_egress_tx,
+                out_buf: stack_tx,
             },
             iface_ingress_tx,
         )

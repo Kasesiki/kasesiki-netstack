@@ -18,16 +18,16 @@ impl StackBuilder {
         Self { tcp_buffer_size, udp_buffer_size, mtu }
     }
 
-    pub fn build(self) -> (Stack, TcpListener) {
+    pub fn build(self) -> std::io::Result<(Stack, TcpListener)> {
         // 传入frame
         let (stack_tx, stack_rx) = mpsc::unbounded();
 
         let (tcp_tx, tcp_rx) = mpsc::channel(self.tcp_buffer_size);
         let (udp_tx, udp_rx) = mpsc::channel(self.tcp_buffer_size);
 
-        let device = VirtualDevice::new(stack_tx);
+        let (device, handle_tx) = VirtualDevice::new(stack_tx);
         
-        (Stack { sink_buf: None, stack_rx, tcp_tx, udp_tx }, TcpListener::new(tcp_rx, 0x3FFF * 20))
+        Ok((Stack { sink_buf: None, stack_rx, tcp_tx, udp_tx }, TcpListener::new(device, tcp_rx, 0x3FFF * 20, handle_tx)?))
     }
 }
 
@@ -87,17 +87,15 @@ impl Stack {
             IpProtocol::Udp => &mut self.udp_tx,
             _ => unreachable!(),
         };
-
         
         if let Err(e) = ready!(tx.poll_ready(cx)) {
             unsafe {Pin::get_unchecked_mut(self).sink_buf.replace(proto)};
-            return Ready(Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, e)));
+            return Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
         };
-        tx.start_send(proto);
-        tx.poll_flush_unpin(cx);
-
+        let _ = tx.start_send(proto);
+        let _ = tx.poll_flush_unpin(cx);
         Ready(Ok(()))
-    } 
+    }
 }
 
 impl Sink<Bytes> for Stack {
