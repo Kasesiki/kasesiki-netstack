@@ -1,3 +1,1 @@
-pub struct UdpSocket {
-    
-}
+pub struct UdpSocket {}
