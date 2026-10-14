@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use futures::channel::mpsc::{Receiver, Sender, UnboundedSender};
-use smoltcp::phy::{Device, RxToken, TxToken};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 
 pub struct VirtualDevice {
     /// 接收过滤后的frame并交给smoltcp处理
@@ -44,11 +44,14 @@ impl Device for VirtualDevice {
     }
 
     fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
-        todo!()
+        Some(Self::TxToken { permit: self.out_buf.clone() })
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
-        todo!()
+        let mut capabilities = DeviceCapabilities::default();
+        capabilities.medium = Medium::Ip;
+        capabilities.max_transmission_unit = 1500;
+        capabilities
     }
 }
 

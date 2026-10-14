@@ -1,8 +1,5 @@
 use std::{
-    io::{Error, ErrorKind::InvalidInput},
-    net::IpAddr,
-    pin::Pin,
-    task::{Poll::Ready, ready},
+    io::{Error, ErrorKind::InvalidInput}, net::IpAddr, ops::Range, pin::Pin, task::{Poll::Ready, ready},
 };
 
 use bytes::Bytes;
@@ -11,7 +8,7 @@ use futures::{
     Sink, SinkExt, Stream, StreamExt,
     channel::mpsc::{self, UnboundedReceiver},
 };
-use smoltcp::wire::{IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet};
+use smoltcp::wire::{IpProtocol, IpVersion::self, Ipv4Packet, Ipv6Packet};
 
 use crate::{device::VirtualDevice, tcp::TcpListener};
 
@@ -71,6 +68,7 @@ where
     T: AsRef<[u8]>,
 {
     pub fn protocol(&self) -> IpProtocol {
+        
         match *self {
             IpPacket::Ipv4(ref packet) => packet.next_header(),
             IpPacket::Ipv6(ref packet) => packet.next_header(),
@@ -97,6 +95,17 @@ where
             IpPacket::Ipv6(ref packet) => IpAddr::from(packet.dst_addr()),
         }
     }
+
+    pub fn size(&self) -> Range<usize> {
+        match *self {
+            IpPacket::Ipv4(ref packet) => {
+                packet.header_len() as usize..packet.total_len() as usize
+            },
+            IpPacket::Ipv6(ref packet) => {
+                packet.header_len() as usize..packet.total_len() as usize
+            },
+        }
+    }
 }
 
 pub struct Stack {
@@ -115,13 +124,11 @@ impl Stack {
             Some(val) => val,
             None => return Ready(Ok(())),
         };
-
         let tx = match proto.protocol() {
             IpProtocol::Tcp => &mut self.tcp_tx,
-            IpProtocol::Udp => &mut self.udp_tx,
-            _ => unreachable!(),
+            //IpProtocol::Udp => &mut self.udp_tx,
+            a => {println!("ignore unknown protocol: {a}");return std::task::Poll::Ready(Ok(()))},
         };
-
         if let Err(e) = ready!(tx.poll_ready(cx)) {
             unsafe { Pin::get_unchecked_mut(self).sink_buf.replace(proto) };
             return Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
@@ -146,15 +153,20 @@ impl Sink<Bytes> for Stack {
     }
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
-        let packet =
-            match IpVersion::of_packet(&item) {
-                Ok(_) => IpPacket::Ipv4(Ipv4Packet::new_checked(item).map_err(|err| {
+        let packet = match IpVersion::of_packet(&item).map_err(|err| {
                     Error::new(InvalidInput, format!("invalid IP packet: {err}"))
-                })?),
-                Err(_) => IpPacket::Ipv6(Ipv6Packet::new_checked(item).map_err(|err| {
-                    Error::new(InvalidInput, format!("invalid IP packet: {err}"))
-                })?),
-            };
+                })? {
+            IpVersion::Ipv4 => {
+                IpPacket::Ipv4(Ipv4Packet::new_checked(item).map_err(|err| {
+                    Error::new(InvalidInput, format!("invalid IPv4 packet: {err}"))
+                })?)
+            }
+            IpVersion::Ipv6 => {
+                IpPacket::Ipv6(Ipv6Packet::new_checked(item).map_err(|err| {
+                    Error::new(InvalidInput, format!("invalid IPv6 packet: {err}"))
+                })?)
+            }
+        };
         unsafe { Pin::get_unchecked_mut(self).sink_buf.replace(packet) };
         Ok(())
     }

@@ -1,8 +1,5 @@
 use std::{
-    collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    pin::pin,
-    task::{
+    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::pin, task::{
         Poll::{Pending, Ready},
         ready,
     },
@@ -23,7 +20,7 @@ pub struct TcpListener {
     tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
     smoltcp_tx: Sender<Bytes>,
     tcp_buffer_size: usize,
-    packet_cache: Option<smoltcp::wire::TcpPacket<Bytes>>,
+    packet_cache: Option<Bytes>,
     iface: Iface,
     sockets: HashMap<SocketHandle, (Sender<Vec<u8>>, Receiver<Vec<u8>>)>,
     removesocket: Vec<SocketHandle>,
@@ -93,14 +90,14 @@ impl TcpListener {
     fn smoltcp_poll(
         &mut self,
         cx: &mut std::task::Context<'_>,
-        packet: smoltcp::wire::TcpPacket<Bytes>,
+        packet: Bytes,
     ) -> std::task::Poll<Result<(), SendError>> {
         match self.smoltcp_tx.poll_ready(cx) {
             Ready(Err(e)) => {
                 return Ready(Err(e));
             }
             Ready(Ok(())) => {
-                return Ready(self.smoltcp_tx.start_send(packet.into_inner()));
+                return Ready(self.smoltcp_tx.start_send(packet));
             }
             Pending => {
                 self.packet_cache.replace(packet);
@@ -109,7 +106,8 @@ impl TcpListener {
         };
     }
 
-    fn accept_stream(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<(TcpStream, IpAddr, IpAddr)>> {
+    fn accept_stream(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<(TcpStream, SocketAddr, SocketAddr)>> {
+
         let Ok(a) = ready!(pin!(self.tcp_rx.recv()).poll(cx)) else {
             panic!()
         };
@@ -117,16 +115,21 @@ impl TcpListener {
         let src_addr = a.src_addr();
         let dst_addr = a.dst_addr();
 
-        let Ok(packet) = TcpPacket::new_checked(a.take()) else {
+        let range = a.size();
+        let frame = a.take();
+
+        let Ok(packet) = TcpPacket::new_checked(&frame[range]) else {
             panic!()
         };
         let initpacket = packet.syn() && !packet.ack();
-        let dstport = packet.dst_port();
+        let srcaddr = SocketAddr::new(src_addr, packet.src_port());
+        let dstaddr = SocketAddr::new(dst_addr, packet.dst_port());
 
-        match self.smoltcp_poll(cx, packet) {
+        match self.smoltcp_poll(cx, frame) {
             Ready(Err(_)) => return Ready(None),
             Ready(Ok(())) => {
                 return Ready(if initpacket {
+                    
                     let mut socket = smoltcp::socket::tcp::Socket::new(
                         SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
                         SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
@@ -135,15 +138,16 @@ impl TcpListener {
                     socket.set_keep_alive(Some(Duration::from_secs(28)));
                     socket.set_timeout(Some(Duration::from_secs(7200)));
 
-                    socket.listen((dst_addr, dstport)).unwrap();
+                    socket.listen(dstaddr).unwrap();
                     let (recv_tx, recv_rx) = channel(16);
                     let (send_tx, send_rx) = channel(16);
                     let handle = self.iface.socketset.add(socket);
                     self.sockets.insert(handle, (recv_tx, send_rx));
                     let stream = TcpStream::new(send_tx, recv_rx);
-                    Some((stream, src_addr, dst_addr))
+                    Some((stream, srcaddr, dstaddr))
                 } else {
-                    None
+                    cx.waker().wake_by_ref();
+                    return Pending
                 });
             }
             Pending => return Pending,
@@ -165,7 +169,7 @@ impl Iface {
 }
 
 impl Stream for TcpListener {
-    type Item = (TcpStream, IpAddr, IpAddr);
+    type Item = (TcpStream, SocketAddr, SocketAddr);
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
