@@ -5,7 +5,7 @@ use std::{
 use bytes::Bytes;
 use futures::channel::mpsc::Sender;
 use futures::{
-    Sink, SinkExt, Stream, StreamExt,
+    Sink, Stream,
     channel::mpsc::{self, UnboundedReceiver},
 };
 use smoltcp::wire::{IpProtocol, IpVersion::self, Ipv4Packet, Ipv6Packet};
@@ -39,7 +39,7 @@ impl StackBuilder {
         Ok((
             Stack {
                 sink_buf: None,
-                stack_rx,
+                stack_rx: Box::pin(stack_rx),
                 tcp_tx,
                 udp_tx,
             },
@@ -110,7 +110,7 @@ where
 
 pub struct Stack {
     sink_buf: Option<IpPacket<Bytes>>,
-    stack_rx: UnboundedReceiver<Bytes>,
+    stack_rx: Pin<Box<UnboundedReceiver<Bytes>>>,
     tcp_tx: Sender<IpPacket<bytes::Bytes>>,
     udp_tx: Sender<IpPacket<bytes::Bytes>>,
 }
@@ -127,14 +127,17 @@ impl Stack {
         let tx = match proto.protocol() {
             IpProtocol::Tcp => &mut self.tcp_tx,
             //IpProtocol::Udp => &mut self.udp_tx,
-            a => {println!("ignore unknown protocol: {a}");return std::task::Poll::Ready(Ok(()))},
+            a => {
+                //println!("ignore unknown protocol: {a}");
+                return std::task::Poll::Ready(Ok(()))
+            },
         };
         if let Err(e) = ready!(tx.poll_ready(cx)) {
             unsafe { Pin::get_unchecked_mut(self).sink_buf.replace(proto) };
             return Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)));
         };
         let _ = tx.start_send(proto);
-        let _ = tx.poll_flush_unpin(cx);
+        let _ = Box::pin(tx).as_mut().poll_flush(cx);
         Ready(Ok(()))
     }
 }
@@ -194,6 +197,6 @@ impl Stream for Stack {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        Ready(ready!(self.stack_rx.poll_next_unpin(cx)))
+        Ready(ready!(self.stack_rx.as_mut().poll_next(cx)))
     }
 }

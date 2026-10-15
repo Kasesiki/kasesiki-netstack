@@ -1,0 +1,11 @@
+# Netstack smoltcp by Kasesiki
+
+A netstack for the special purpose of turning packets from/to a TUN interface into TCP streams and UDP packets. It uses smoltcp-rs as the backend netstack.
+
+In development.
+
+no runtime depend, high perfermance, easy useful.
+
+## Example
+
+see examples/minimal.rs

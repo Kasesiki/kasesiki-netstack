@@ -1,5 +1,9 @@
+use std::net::SocketAddr;
+
 use futures::{SinkExt, StreamExt};
 use netstack_smoltcp::stack::StackBuilder;
+use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}};
+use tokio_util::compat::FuturesAsyncReadCompatExt as _;
 
 
 #[tokio::main]
@@ -44,8 +48,19 @@ async fn main() -> std::io::Result<()> {
     });
 
     tokio::spawn(async move {
-        while let Some((_stream, src, dst)) = _tcplistener.next().await {
-            println!("{src} - {dst}");
+        while let Some((stream, src, dst)) = _tcplistener.next().await {
+            tokio::spawn(async move {
+                println!("new tcp connection: {:?} => {:?}", src, dst);
+                match new_tcp_stream(dst).await {
+                    Ok(mut remote_stream) => {
+                        let _ = copy_bidirectional(&mut stream.compat(), &mut remote_stream).await;
+                    }
+                    Err(e) => println!(
+                        "failed to new tcp stream {:?}=>{:?}, err: {:?}",
+                        src, dst, e
+                    ),
+                }
+            });
         }
         println!("tcpover.")
     });
@@ -54,4 +69,20 @@ async fn main() -> std::io::Result<()> {
 
     Ok(())
     
+}
+
+async fn new_tcp_stream<'a>(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    //use socket2_ext::{AddressBinding, BindDeviceOption};
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    socket.bind_device(Some(b"wlan5"))?;
+    //socket.bind_to_device(BindDeviceOption::v4("wlan5"))?;
+    socket.set_keepalive(true)?;
+    socket.set_tcp_nodelay(true)?;
+    socket.set_nonblocking(true)?;
+
+    let stream = TcpSocket::from_std_stream(socket.into())
+        .connect(addr)
+        .await?;
+
+    Ok(stream)
 }

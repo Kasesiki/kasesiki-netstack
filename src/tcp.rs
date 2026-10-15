@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::pin, task::{
+    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::{Pin, pin}, task::{
         Poll::{Pending, Ready},
         ready,
     },
@@ -7,8 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::{
-    AsyncRead, AsyncWrite, SinkExt, Stream, StreamExt as _,
-    channel::mpsc::{Receiver, SendError, Sender, channel},
+    AsyncRead, AsyncWrite, Sink, Stream, channel::mpsc::{Receiver, SendError, Sender, channel},
 };
 use smoltcp::{
     iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
@@ -237,13 +236,13 @@ impl Stream for TcpListener {
 
 // next函数将数据塞入recv_buffer, 用户态将数据塞入send_buffer
 pub struct TcpStream {
-    send_ch: Sender<Vec<u8>>,
-    recv_ch: Receiver<Vec<u8>>,
+    send_ch: Pin<Box<Sender<Vec<u8>>>>,
+    recv_ch: Pin<Box<Receiver<Vec<u8>>>>,
 }
 
 impl TcpStream {
     pub fn new(send_ch: Sender<Vec<u8>>, recv_ch: Receiver<Vec<u8>>) -> Self {
-        TcpStream { send_ch, recv_ch }
+        TcpStream { send_ch: Box::pin(send_ch), recv_ch: Box::pin(recv_ch) }
     }
 }
 
@@ -253,7 +252,7 @@ impl AsyncRead for TcpStream {
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        match self.recv_ch.poll_next_unpin(cx) {
+        match self.recv_ch.as_mut().poll_next(cx) {
             Pending => Pending,
             Ready(Some(byte)) => {
                 buf.copy_from_slice(&byte);
@@ -274,7 +273,7 @@ impl AsyncWrite for TcpStream {
             return Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
         }
         let _ = self.send_ch.start_send(buf.to_vec());
-        let _ = ready!(self.send_ch.poll_flush_unpin(cx));
+        let _ = ready!(self.send_ch.as_mut().poll_flush(cx));
 
         Ready(Ok(buf.len()))
     }
@@ -284,7 +283,7 @@ impl AsyncWrite for TcpStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         Ready(
-            ready!(self.send_ch.poll_flush_unpin(cx))
+            ready!(self.send_ch.as_mut().poll_flush(cx))
                 .map_err(|_| std::io::ErrorKind::BrokenPipe.into()),
         )
     }
