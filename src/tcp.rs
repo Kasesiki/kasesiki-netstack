@@ -276,8 +276,14 @@ impl AsyncRead for TcpStream {
         match self.recv_ch.as_mut().poll_next(cx) {
             Pending => Pending,
             Ready(Some(byte)) => {
-                buf.copy_from_slice(&byte);
-                Ready(Ok(byte.len()))
+                if byte.len() > buf.len() {
+                    buf.copy_from_slice(&byte[..buf.len()]);
+                    Ready(Ok(buf.len()))
+                } else {
+                    buf[..byte.len()].copy_from_slice(&byte);
+                    Ready(Ok(byte.len()))
+                }
+
             }
             Ready(None) => Ready(Err(std::io::ErrorKind::BrokenPipe.into())),
         }
