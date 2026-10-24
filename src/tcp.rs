@@ -64,7 +64,7 @@ pub struct TcpListener {
     tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
     smoltcp_tx: Sender<Bytes>,
     tcp_buffer_size: usize,
-    packet_cache: Option<Bytes>,
+    packet_cache: Option<(Bytes, Option<(std::net::SocketAddr, std::net::SocketAddr)>)>,
     iface: Iface,
     sockets: HashMap<SocketHandle, (Sender<Vec<u8>>, Receiver<Vec<u8>>)>,
     removesocket: Vec<SocketHandle>,
@@ -110,22 +110,46 @@ impl TcpListener {
         &mut self,
         cx: &mut std::task::Context<'_>,
         packet: Bytes,
-    ) -> std::task::Poll<Result<(), SendError>> {
+        mut initdata: Option<(SocketAddr, SocketAddr)>,
+    ) -> std::task::Poll<Result<(TcpStream, SocketAddr, SocketAddr), SendError>> {
         match self.smoltcp_tx.poll_ready(cx) {
             Ready(Err(e)) => {
                 return Ready(Err(e));
             }
             Ready(Ok(())) => {
-                return Ready(self.smoltcp_tx.start_send(packet));
+                cx.waker().wake_by_ref();
+                self.smoltcp_tx.start_send(packet)?;
+                if let Some((src, dst)) = initdata.take() {
+                    let mut socket = smoltcp::socket::tcp::Socket::new(
+                        SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
+                        SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
+                    );
+                    socket.set_keep_alive(Some(Duration::from_secs(28)));
+                    socket.set_timeout(Some(Duration::from_secs(7200)));
+                    socket.listen(dst).unwrap();
+
+
+                    let (recv_tx, recv_rx) = channel(16);
+                    let (send_tx, send_rx) = channel(16);
+
+                    let handle = self.iface.socketset.add(socket);
+                    self.sockets.insert(handle, (recv_tx, send_rx));
+                    let stream = TcpStream::new(send_tx, recv_rx);
+                    return Ready(Ok((stream, src, dst)))
+                } else {
+                    return Pending;
+                }
+                
             }
             Pending => {
-                self.packet_cache.replace(packet);
+                self.packet_cache.replace((packet, initdata));
                 return Pending;
             }
         };
     }
 
-    fn iface_poll(&mut self, timestamp: Instant) {
+    fn iface_poll(&mut self) {
+        let timestamp = Instant::now();
         self.iface.poll(timestamp);
         let (sockets, socketset, removesockets) = self.rebain();
         
@@ -156,10 +180,17 @@ impl TcpListener {
                 }
             }
 
-            if socket.can_send() && let Ok(data) = recv_rx.try_recv() {
+            if socket.can_send() && let Ok(byte) = recv_rx.try_recv() {
                 if let Err(_) = socket.send(|buf| {
-                    buf.copy_from_slice(&data);
-                    (data.len(), ())
+                    println!("recv: byte len: {}, buf len: {}", byte.len(), buf.len());
+                    if byte.len() > buf.len() {
+                        buf.copy_from_slice(&byte[..buf.len()]);
+                        (buf.len(), ())
+                    } else {
+                        buf[..byte.len()].copy_from_slice(&byte);
+                        (byte.len(), ())
+                    }
+
                 }) {
                     socket.abort();
                     recv_rx.close();
@@ -172,12 +203,13 @@ impl TcpListener {
             self.sockets.remove(&handle);
             self.iface.socketset.remove(handle);
         }
-        let du = self.poll_delay(timestamp).into();
-        self.polled.reset(du);
+        let du = self.poll_delay(timestamp);
+        println!("wait {:?}", du);
+        self.polled.reset(du.into());
     }
 
     pub fn poll_delay(&mut self, stamp: Instant) -> Duration {
-        self.iface.iface.poll_delay(stamp, &self.iface.socketset).unwrap_or(Duration::from_millis(5))
+        self.iface.iface.poll_delay(stamp, &self.iface.socketset).unwrap_or(Duration::from_millis(5)).min(Duration::from_millis(300))
     }
 
     fn accept_stream(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<(TcpStream, SocketAddr, SocketAddr)>> {
@@ -196,36 +228,20 @@ impl TcpListener {
             panic!()
         };
         let initpacket = packet.syn() && !packet.ack();
-        let srcaddr = SocketAddr::new(src_addr, packet.src_port());
-        let dstaddr = SocketAddr::new(dst_addr, packet.dst_port());
 
-        match self.smoltcp_poll(cx, frame) {
+        let initdata = if initpacket {
+            let srcaddr = SocketAddr::new(src_addr, packet.src_port());
+            let dstaddr = SocketAddr::new(dst_addr, packet.dst_port());
+            Some((srcaddr, dstaddr))
+        } else { None };
+
+        match self.smoltcp_poll(cx, frame, initdata) {
             Ready(Err(_)) => return Ready(None),
-            Ready(Ok(())) => {
-                return Ready(if initpacket {
-                    
-                    let mut socket = smoltcp::socket::tcp::Socket::new(
-                        SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
-                        SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
-                    );
-
-                    socket.set_keep_alive(Some(Duration::from_secs(28)));
-                    socket.set_timeout(Some(Duration::from_secs(7200)));
-
-                    socket.listen(dstaddr).unwrap();
-                    let (recv_tx, recv_rx) = channel(16);
-                    let (send_tx, send_rx) = channel(16);
-                    let handle = self.iface.socketset.add(socket);
-                    self.sockets.insert(handle, (recv_tx, send_rx));
-                    let stream = TcpStream::new(send_tx, recv_rx);
-                    Some((stream, srcaddr, dstaddr))
-                } else {
-                    cx.waker().wake_by_ref();
-                    return Pending
-                });
+            Ready(Ok(initdata)) => {
+                Ready(Some(initdata))
             }
             Pending => return Pending,
-        };
+        }
     }
 }
 
@@ -236,22 +252,31 @@ impl Stream for TcpListener {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        if let Some(packet) = self.packet_cache.take() {
-            match self.smoltcp_poll(cx, packet) {
+        if let Some((packet, initdata)) = self.packet_cache.take() {
+            match self.smoltcp_poll(cx, packet, initdata) {
                 Ready(Err(_)) => return Ready(None),
-                Ready(Ok(())) => {}
-                Pending => return Pending,
+                Ready(Ok(x)) => { return Ready(Some(x)) }
+                Pending => {  },
             };
         }
-        let stamp = Instant::now();
-        match self.polled.poll_unpin(cx) {
+        match self.accept_stream(cx) {
             Pending => {}
-            Ready(()) => {
-                self.iface_poll(stamp);
+            Ready(a) => {
+                return Ready(a);
             }
         }
+        
+        
+        match self.polled.poll_unpin(cx) {
+            Pending => { }
+            Ready(()) => {
+                self.iface_poll();
+                cx.waker().wake_by_ref();
 
-        self.accept_stream(cx)
+            }
+        }
+        
+        Pending
     }
 }
 
