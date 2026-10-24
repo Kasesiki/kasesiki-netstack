@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr};
 
 use futures::{SinkExt, StreamExt};
 use netstack_smoltcp::stack::StackBuilder;
@@ -62,7 +62,6 @@ async fn main() -> std::io::Result<()> {
                 }
             });
         }
-        println!("tcpover.")
     });
 
     let _ = tokio::join!(a, b);

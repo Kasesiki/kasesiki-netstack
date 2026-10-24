@@ -10,7 +10,7 @@ use futures::{
 };
 use smoltcp::wire::{IpProtocol, IpVersion::self, Ipv4Packet, Ipv6Packet};
 
-use crate::{device::VirtualDevice, tcp::TcpListener};
+use crate::{device::VirtualDevice, tcp::{TcpListener}};
 
 pub struct StackBuilder {
     tcp_buffer_size: usize,
@@ -32,7 +32,7 @@ impl StackBuilder {
         let (stack_tx, stack_rx) = mpsc::unbounded();
 
         let (tcp_tx, tcp_rx) = mpsc::channel(self.tcp_buffer_size);
-        let (udp_tx, udp_rx) = mpsc::channel(self.tcp_buffer_size);
+        let (udp_tx, udp_rx) = mpsc::channel(self.udp_buffer_size);
 
         let (device, handle_tx) = VirtualDevice::new(stack_tx);
 
@@ -51,7 +51,7 @@ impl StackBuilder {
 impl Default for StackBuilder {
     fn default() -> Self {
         Self {
-            tcp_buffer_size: 512,
+            tcp_buffer_size: 64,
             udp_buffer_size: 64,
             mtu: 1500,
         }
@@ -127,7 +127,7 @@ impl Stack {
         let tx = match proto.protocol() {
             IpProtocol::Tcp => &mut self.tcp_tx,
             //IpProtocol::Udp => &mut self.udp_tx,
-            a => {
+            _ => {
                 //println!("ignore unknown protocol: {a}");
                 return std::task::Poll::Ready(Ok(()))
             },

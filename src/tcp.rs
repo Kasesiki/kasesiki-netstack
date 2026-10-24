@@ -2,27 +2,31 @@ use std::{
     collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::{Pin, pin}, task::{
         Poll::{Pending, Ready},
         ready,
-    },
+    }
 };
 
 use bytes::Bytes;
 use futures::{
-    AsyncRead, AsyncWrite, Sink, Stream, channel::mpsc::{Receiver, SendError, Sender, channel},
+    AsyncRead, AsyncWrite, FutureExt, Sink, Stream, channel::mpsc::{Receiver, SendError, Sender, channel},
 };
+use futures_timer::Delay;
 use smoltcp::{
     iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
 };
 
 use crate::{device::VirtualDevice, stack::IpPacket};
 
-pub struct TcpListener {
-    tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
-    smoltcp_tx: Sender<Bytes>,
-    tcp_buffer_size: usize,
-    packet_cache: Option<Bytes>,
-    iface: Iface,
-    sockets: HashMap<SocketHandle, (Sender<Vec<u8>>, Receiver<Vec<u8>>)>,
-    removesocket: Vec<SocketHandle>,
+struct Iface {
+    pub iface: Interface,
+    device: VirtualDevice,
+    pub socketset: SocketSet<'static>,
+}
+
+impl Iface {
+    pub fn poll(&mut self, instant: Instant) -> PollResult {
+        self.iface
+            .poll(instant, &mut self.device, &mut self.socketset)
+    }
 }
 
 fn create_interface<D>(device: &mut D) -> std::io::Result<Interface>
@@ -52,6 +56,21 @@ where
     Ok(iface)
 }
 
+pub trait Timer {
+    
+}
+
+pub struct TcpListener {
+    tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
+    smoltcp_tx: Sender<Bytes>,
+    tcp_buffer_size: usize,
+    packet_cache: Option<Bytes>,
+    iface: Iface,
+    sockets: HashMap<SocketHandle, (Sender<Vec<u8>>, Receiver<Vec<u8>>)>,
+    removesocket: Vec<SocketHandle>,
+    polled: futures_timer::Delay,
+}
+
 impl TcpListener {
     pub fn new(
         mut device: VirtualDevice,
@@ -71,6 +90,7 @@ impl TcpListener {
                 device,
                 socketset,
             },
+            polled: Delay::new(std::time::Duration::from_millis(1)),
             sockets: HashMap::new(),
             removesocket: vec![],
         })
@@ -103,6 +123,61 @@ impl TcpListener {
                 return Pending;
             }
         };
+    }
+
+    fn iface_poll(&mut self, timestamp: Instant) {
+        self.iface.poll(timestamp);
+        let (sockets, socketset, removesockets) = self.rebain();
+        
+        for (handle, (send_tx, recv_rx)) in sockets.iter_mut() {
+            let socket: &mut smoltcp::socket::tcp::Socket = socketset.get_mut(*handle);
+            if socket.state() == State::Closed {
+                recv_rx.close();
+                send_tx.close_channel();
+                removesockets.push(*handle);
+                continue;
+            }
+            if send_tx.is_closed() {
+                socket.abort();
+                continue;
+            }
+
+            if socket.can_recv() {
+                if let Err(_) = socket.recv(|buf| {
+                    if let Err(_) = send_tx.try_send(buf.to_vec()) {
+                        (buf.len(), ())
+                    } else {
+                        (0, ())
+                    }
+                }) {
+                    socket.abort();
+                    send_tx.close_channel();
+                    continue;
+                }
+            }
+
+            if socket.can_send() && let Ok(data) = recv_rx.try_recv() {
+                if let Err(_) = socket.send(|buf| {
+                    buf.copy_from_slice(&data);
+                    (data.len(), ())
+                }) {
+                    socket.abort();
+                    recv_rx.close();
+                    continue;
+                }
+            }
+        }
+
+        while let Some(handle) = self.removesocket.pop() {
+            self.sockets.remove(&handle);
+            self.iface.socketset.remove(handle);
+        }
+        let du = self.poll_delay(timestamp).into();
+        self.polled.reset(du);
+    }
+
+    pub fn poll_delay(&mut self, stamp: Instant) -> Duration {
+        self.iface.iface.poll_delay(stamp, &self.iface.socketset).unwrap_or(Duration::from_millis(5))
     }
 
     fn accept_stream(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<(TcpStream, SocketAddr, SocketAddr)>> {
@@ -154,19 +229,6 @@ impl TcpListener {
     }
 }
 
-struct Iface {
-    pub iface: Interface,
-    device: VirtualDevice,
-    pub socketset: SocketSet<'static>,
-}
-
-impl Iface {
-    pub fn poll(&mut self) -> PollResult {
-        self.iface
-            .poll(Instant::now(), &mut self.device, &mut self.socketset)
-    }
-}
-
 impl Stream for TcpListener {
     type Item = (TcpStream, SocketAddr, SocketAddr);
 
@@ -181,52 +243,11 @@ impl Stream for TcpListener {
                 Pending => return Pending,
             };
         }
-        self.iface.poll();
-        {
-            let (sockets, socketset, removesockets) = self.rebain();
-            
-            for (handle, (send_tx, recv_rx)) in sockets.iter_mut() {
-                let socket: &mut smoltcp::socket::tcp::Socket = socketset.get_mut(*handle);
-                if socket.state() == State::Closed {
-                    recv_rx.close();
-                    send_tx.close_channel();
-                    removesockets.push(*handle);
-                    continue;
-                }
-                if send_tx.is_closed() {
-                    socket.abort();
-                    continue;
-                }
-
-                if socket.can_recv() {
-                    if let Err(_) = socket.recv(|buf| {
-                        if let Err(_) = send_tx.try_send(buf.to_vec()) {
-                            (buf.len(), ())
-                        } else {
-                            (0, ())
-                        }
-                    }) {
-                        socket.abort();
-                        send_tx.close_channel();
-                        continue;
-                    }
-                }
-
-                if socket.can_send() && let Ok(data) = recv_rx.try_recv() {
-                    if let Err(_) = socket.send(|buf| {
-                        buf.copy_from_slice(&data);
-                        (data.len(), ())
-                    }) {
-                        socket.abort();
-                        recv_rx.close();
-                        continue;
-                    }
-                }
-            }
-
-            while let Some(handle) = self.removesocket.pop() {
-                self.sockets.remove(&handle);
-                self.iface.socketset.remove(handle);
+        let stamp = Instant::now();
+        match self.polled.poll_unpin(cx) {
+            Pending => {}
+            Ready(()) => {
+                self.iface_poll(stamp);
             }
         }
 
