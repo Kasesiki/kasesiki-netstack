@@ -34,7 +34,7 @@ impl StackBuilder {
         let (tcp_tx, tcp_rx) = mpsc::channel(self.tcp_buffer_size);
         let (udp_tx, udp_rx) = mpsc::channel(self.udp_buffer_size);
 
-        let (device, handle_tx) = VirtualDevice::new(stack_tx);
+        let (device, handle_tx) = VirtualDevice::new(stack_tx, self.mtu.into());
 
         Ok((
             Stack {

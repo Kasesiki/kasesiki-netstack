@@ -8,15 +8,18 @@ pub struct VirtualDevice {
 
     /// 将smoltcp处理后的数据发送到tun
     out_buf: UnboundedSender<Bytes>,
+
+    mtu: usize,
 }
 
 impl VirtualDevice {
-    pub fn new(stack_tx: UnboundedSender<Bytes>) -> (Self, Sender<Bytes>) {
+    pub fn new(stack_tx: UnboundedSender<Bytes>, mtu: usize) -> (Self, Sender<Bytes>) {
         let (iface_ingress_tx, iface_ingress_rx) = futures::channel::mpsc::channel(10);
         (
             Self {
                 in_buf: iface_ingress_rx,
                 out_buf: stack_tx,
+                mtu,
             },
             iface_ingress_tx,
         )
@@ -50,7 +53,7 @@ impl Device for VirtualDevice {
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
         let mut capabilities = DeviceCapabilities::default();
         capabilities.medium = Medium::Ip;
-        capabilities.max_transmission_unit = 1500;
+        capabilities.max_transmission_unit = self.mtu;
         capabilities
     }
 }

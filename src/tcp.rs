@@ -168,7 +168,7 @@ impl TcpListener {
 
             if socket.can_recv() {
                 if let Err(_) = socket.recv(|buf| {
-                    if let Err(_) = send_tx.try_send(buf.to_vec()) {
+                    if let Ok(()) = send_tx.try_send(buf.to_vec()) {
                         (buf.len(), ())
                     } else {
                         (0, ())
@@ -180,9 +180,9 @@ impl TcpListener {
                 }
             }
 
-            if socket.can_send() && let Ok(byte) = recv_rx.try_recv() {
+            while socket.can_send() && let Ok(byte) = recv_rx.try_recv() {
                 if let Err(_) = socket.send(|buf| {
-                    println!("recv: byte len: {}, buf len: {}", byte.len(), buf.len());
+                    // println!("recv: byte len: {}, buf len: {}", byte.len(), buf.len());
                     if byte.len() > buf.len() {
                         buf.copy_from_slice(&byte[..buf.len()]);
                         (buf.len(), ())
@@ -204,7 +204,6 @@ impl TcpListener {
             self.iface.socketset.remove(handle);
         }
         let du = self.poll_delay(timestamp);
-        println!("wait {:?}", du);
         self.polled.reset(du.into());
     }
 
