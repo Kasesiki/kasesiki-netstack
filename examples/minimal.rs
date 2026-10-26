@@ -53,7 +53,6 @@ async fn main() -> std::io::Result<()> {
                 println!("new tcp connection: {:?} => {:?}", src, dst);
                 match new_tcp_stream(dst).await {
                     Ok(mut remote_stream) => {
-                        println!("ok");
                         let _ = copy_bidirectional(&mut stream.compat(), &mut remote_stream).await;
                     }
                     Err(e) => println!(
@@ -72,10 +71,7 @@ async fn main() -> std::io::Result<()> {
 }
 
 async fn new_tcp_stream<'a>(addr: SocketAddr) -> std::io::Result<TcpStream> {
-    //use socket2_ext::{AddressBinding, BindDeviceOption};
     let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
-    // socket.bind_device(Some(b"wlan6"))?;
-    //socket.bind_to_device(BindDeviceOption::v4("wlan5"))?;
     socket.set_keepalive(true)?;
     socket.set_tcp_nodelay(true)?;
     socket.set_nonblocking(true)?;

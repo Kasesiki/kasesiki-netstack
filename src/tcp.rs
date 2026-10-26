@@ -7,14 +7,15 @@ use std::{
 
 use bytes::Bytes;
 use futures::{
-    AsyncRead, AsyncWrite, FutureExt, Sink, Stream, channel::mpsc::{Receiver, SendError, Sender, channel},
+    AsyncRead, AsyncWrite, FutureExt, Stream, channel::mpsc::{Receiver, SendError, Sender,},
 };
 use futures_timer::Delay;
+use ringbuf::traits::{Consumer, Observer, Producer as _};
 use smoltcp::{
-    iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
+    iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
 };
 
-use crate::{device::VirtualDevice, stack::IpPacket};
+use crate::{device::VirtualDevice, stack::IpPacket, transfer::{self, Reader, Writer}};
 
 struct Iface {
     pub iface: Interface,
@@ -66,7 +67,7 @@ pub struct TcpListener {
     tcp_buffer_size: usize,
     packet_cache: Option<(Bytes, Option<(std::net::SocketAddr, std::net::SocketAddr)>)>,
     iface: Iface,
-    sockets: HashMap<SocketHandle, (Sender<Vec<u8>>, Receiver<Vec<u8>>)>,
+    sockets: HashMap<SocketHandle, (Writer, Reader)>,
     removesocket: Vec<SocketHandle>,
     polled: futures_timer::Delay,
 }
@@ -99,7 +100,7 @@ impl TcpListener {
     pub fn rebain(
         &mut self,
     ) -> (
-        &mut HashMap<SocketHandle, (Sender<Vec<u8>>, Receiver<Vec<u8>>)>,
+        &mut HashMap<SocketHandle, (Writer, Reader)>,
         &mut SocketSet<'static>,
         &mut Vec<SocketHandle>
     ) {
@@ -129,12 +130,12 @@ impl TcpListener {
                     socket.listen(dst).unwrap();
 
 
-                    let (recv_tx, recv_rx) = channel(16);
-                    let (send_tx, send_rx) = channel(16);
+                    let (streamprob, streamcons) = transfer::transfer(0x3FFF * 20);
+                    let (socketprob, socketcons) = transfer::transfer(0x3FFF * 20);
 
                     let handle = self.iface.socketset.add(socket);
-                    self.sockets.insert(handle, (recv_tx, send_rx));
-                    let stream = TcpStream::new(send_tx, recv_rx);
+                    self.sockets.insert(handle, (socketprob, streamcons));
+                    let stream = TcpStream::new(streamprob, socketcons);
                     return Ready(Ok((stream, src, dst)))
                 } else {
                     return Pending;
@@ -155,45 +156,38 @@ impl TcpListener {
         
         for (handle, (send_tx, recv_rx)) in sockets.iter_mut() {
             let socket: &mut smoltcp::socket::tcp::Socket = socketset.get_mut(*handle);
-            if socket.state() == State::Closed {
-                recv_rx.close();
-                send_tx.close_channel();
-                removesockets.push(*handle);
-                continue;
-            }
-            if send_tx.is_closed() {
-                socket.abort();
-                continue;
-            }
+            // if socket.state() == State::Closed {
+            //     recv_rx.close();
+            //     send_tx.close_channel();
+            //     removesockets.push(*handle);
+            //     continue;
+            // }
+            // if send_tx.is_closed() {
+            //     socket.abort();
+            //     continue;
+            // }
 
             if socket.can_recv() {
                 if let Err(_) = socket.recv(|buf| {
-                    if let Ok(()) = send_tx.try_send(buf.to_vec()) {
-                        (buf.len(), ())
-                    } else {
-                        (0, ())
-                    }
+                    let n = send_tx.inner.push_slice(buf);
+                    send_tx.wake();
+                    (n, ())
                 }) {
                     socket.abort();
-                    send_tx.close_channel();
+                    //send_tx.close_channel();
                     continue;
                 }
             }
 
-            while socket.can_send() && let Ok(byte) = recv_rx.try_recv() {
+            while socket.can_send() && !recv_rx.inner.is_empty() {
                 if let Err(_) = socket.send(|buf| {
-                    // println!("recv: byte len: {}, buf len: {}", byte.len(), buf.len());
-                    if byte.len() > buf.len() {
-                        buf.copy_from_slice(&byte[..buf.len()]);
-                        (buf.len(), ())
-                    } else {
-                        buf[..byte.len()].copy_from_slice(&byte);
-                        (byte.len(), ())
-                    }
+                    let n = recv_rx.inner.pop_slice(buf);
+                    recv_rx.wake();
+                    (n, ())
 
                 }) {
                     socket.abort();
-                    recv_rx.close();
+                    //recv_rx.close();
                     continue;
                 }
             }
@@ -281,12 +275,12 @@ impl Stream for TcpListener {
 
 // next函数将数据塞入recv_buffer, 用户态将数据塞入send_buffer
 pub struct TcpStream {
-    send_ch: Pin<Box<Sender<Vec<u8>>>>,
-    recv_ch: Pin<Box<Receiver<Vec<u8>>>>,
+    send_ch: Pin<Box<Writer>>,
+    recv_ch: Pin<Box<Reader>>,
 }
 
 impl TcpStream {
-    pub fn new(send_ch: Sender<Vec<u8>>, recv_ch: Receiver<Vec<u8>>) -> Self {
+    pub fn new(send_ch: Writer, recv_ch: Reader) -> Self {
         TcpStream { send_ch: Box::pin(send_ch), recv_ch: Box::pin(recv_ch) }
     }
 }
@@ -297,20 +291,8 @@ impl AsyncRead for TcpStream {
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        match self.recv_ch.as_mut().poll_next(cx) {
-            Pending => Pending,
-            Ready(Some(byte)) => {
-                if byte.len() > buf.len() {
-                    buf.copy_from_slice(&byte[..buf.len()]);
-                    Ready(Ok(buf.len()))
-                } else {
-                    buf[..byte.len()].copy_from_slice(&byte);
-                    Ready(Ok(byte.len()))
-                }
-
-            }
-            Ready(None) => Ready(Err(std::io::ErrorKind::BrokenPipe.into())),
-        }
+        let n = ready!(self.recv_ch.pop_slice(cx, buf));
+        Ready(Ok(n))
     }
 }
 
@@ -320,30 +302,26 @@ impl AsyncWrite for TcpStream {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        if let Err(_) = ready!(self.send_ch.poll_ready(cx)) {
-            return Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
-        }
-        let _ = self.send_ch.start_send(buf.to_vec());
-        let _ = ready!(self.send_ch.as_mut().poll_flush(cx));
-
-        Ready(Ok(buf.len()))
+        let n = ready!(self.send_ch.push_slice(cx, buf));
+        Ready(Ok(n))
     }
 
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        Ready(
-            ready!(self.send_ch.as_mut().poll_flush(cx))
-                .map_err(|_| std::io::ErrorKind::BrokenPipe.into()),
-        )
+        Ready(Ok(()))
+        // Ready(
+        //     ready!(self.send_ch.as_mut().poll_flush(cx))
+        //         .map_err(|_| std::io::ErrorKind::BrokenPipe.into()),
+        // )
     }
 
     fn poll_close(
         mut self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        self.send_ch.close_channel();
+        // self.send_ch.close_channel();
         Ready(Ok(()))
     }
 }
