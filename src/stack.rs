@@ -1,9 +1,9 @@
 use std::{
-    io::{Error, ErrorKind::InvalidInput}, net::IpAddr, ops::Range, pin::Pin, task::{Poll::Ready, ready},
+    io::{Error, ErrorKind::InvalidInput}, net::IpAddr, ops::Range, pin::Pin, sync::Arc, task::{Poll::Ready, ready},
 };
 
 use bytes::Bytes;
-use futures::channel::mpsc::Sender;
+use futures::{channel::mpsc::Sender, task::AtomicWaker};
 use futures::{
     Sink, Stream,
     channel::mpsc::{self, UnboundedReceiver},
@@ -27,12 +27,12 @@ impl StackBuilder {
         }
     }
 
-    pub fn build(self) -> std::io::Result<(Stack, TcpListener)> {
+    pub fn build(self, ref_waker: Arc<AtomicWaker>) -> std::io::Result<(Stack, TcpListener)> {
         // 传入frame
         let (stack_tx, stack_rx) = mpsc::unbounded();
 
         let (tcp_tx, tcp_rx) = mpsc::channel(self.tcp_buffer_size);
-        let (udp_tx, udp_rx) = mpsc::channel(self.udp_buffer_size);
+        let (udp_tx, _udp_rx) = mpsc::channel(self.udp_buffer_size);
 
         let (device, handle_tx) = VirtualDevice::new(stack_tx, self.mtu.into());
 
@@ -41,9 +41,9 @@ impl StackBuilder {
                 sink_buf: None,
                 stack_rx: Box::pin(stack_rx),
                 tcp_tx,
-                udp_tx,
+                _udp_tx: udp_tx,
             },
-            TcpListener::new(device, tcp_rx, 0x3FFF * 20, handle_tx)?,
+            TcpListener::new(device, tcp_rx, 0x3FFF * 20, handle_tx, ref_waker)?,
         ))
     }
 }
@@ -112,7 +112,7 @@ pub struct Stack {
     sink_buf: Option<IpPacket<Bytes>>,
     stack_rx: Pin<Box<UnboundedReceiver<Bytes>>>,
     tcp_tx: Sender<IpPacket<bytes::Bytes>>,
-    udp_tx: Sender<IpPacket<bytes::Bytes>>,
+    _udp_tx: Sender<IpPacket<bytes::Bytes>>,
 }
 
 impl Stack {

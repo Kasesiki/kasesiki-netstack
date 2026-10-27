@@ -1,6 +1,6 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, task::AtomicWaker};
 use netstack_smoltcp::stack::StackBuilder;
 use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}};
 use tokio_util::compat::FuturesAsyncReadCompatExt as _;
@@ -8,7 +8,8 @@ use tokio_util::compat::FuturesAsyncReadCompatExt as _;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let (_stack, mut _tcplistener) = StackBuilder::default().build()?;
+    let waker = Arc::new(AtomicWaker::new());
+    let (stack, mut _tcplistener) = StackBuilder::default().build(waker.clone())?;
 
     let mut cfg = tun2::Configuration::default();
     cfg.layer(tun2::Layer::L3);
@@ -31,13 +32,13 @@ async fn main() -> std::io::Result<()> {
     let framed = device.into_framed();
     let (mut tun_sink, mut tun_stream) = framed.split();
 
-    let (mut stackr, mut stackw) = _stack.split();
-    
+    let (mut stackr, mut stackw) = stack.split();
     let a = tokio::spawn(async move {
         while let Some(Ok(buf)) = tun_stream.next().await {
             if let Err(err) = stackr.send(buf.into()).await {
                 println!("{err}")
             }
+            waker.wake();
         }
     });
 

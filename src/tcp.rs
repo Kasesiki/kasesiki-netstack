@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::{Pin, pin}, sync::atomic::Ordering::Relaxed, task::{
+    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::{Pin, pin}, sync::{Arc, atomic::Ordering::Relaxed}, task::{
         Poll::{Pending, Ready},
         ready,
     }
@@ -7,7 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::{
-    AsyncRead, AsyncWrite, FutureExt, Stream, channel::mpsc::{Receiver, SendError, Sender,},
+    AsyncRead, AsyncWrite, FutureExt, Stream, channel::mpsc::{Receiver, SendError, Sender,}, task::AtomicWaker,
 };
 use futures_timer::Delay;
 use ringbuf::traits::{Consumer, Observer, Producer as _};
@@ -57,10 +57,6 @@ where
     Ok(iface)
 }
 
-pub trait Timer {
-    
-}
-
 pub struct TcpListener {
     tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
     smoltcp_tx: Sender<Bytes>,
@@ -70,6 +66,7 @@ pub struct TcpListener {
     sockets: HashMap<SocketHandle, (Writer, Reader)>,
     removesocket: Vec<SocketHandle>,
     polled: futures_timer::Delay,
+    ref_waker: Arc<AtomicWaker>,
 }
 
 impl TcpListener {
@@ -78,6 +75,7 @@ impl TcpListener {
         tcp_rx: Receiver<IpPacket<Bytes>>,
         tcp_buffer_size: usize,
         smoltcp_tx: Sender<Bytes>,
+        ref_waker: Arc<AtomicWaker>
     ) -> std::io::Result<Self> {
         let iface = create_interface(&mut device)?;
         let socketset = SocketSet::new(vec![]);
@@ -94,6 +92,7 @@ impl TcpListener {
             polled: Delay::new(std::time::Duration::from_millis(1)),
             sockets: HashMap::new(),
             removesocket: vec![],
+            ref_waker
         })
     }
 
@@ -149,7 +148,7 @@ impl TcpListener {
         };
     }
 
-    fn iface_poll(&mut self) {
+    fn iface_poll(&mut self, cx: &mut std::task::Context<'_>) {
         let timestamp = Instant::now();
         self.iface.poll(timestamp);
         let (sockets, socketset, removesockets) = self.rebain();
@@ -176,7 +175,6 @@ impl TcpListener {
                     (n, ())
                 }) {
                     socket.abort();
-                    //send_tx.close_channel();
                     continue;
                 }
             }
@@ -189,7 +187,6 @@ impl TcpListener {
 
                 }) {
                     socket.abort();
-                    //recv_rx.close();
                     continue;
                 }
             }
@@ -201,10 +198,11 @@ impl TcpListener {
         }
         let du = self.poll_delay(timestamp);
         self.polled.reset(du.into());
+        self.ref_waker.register(cx.waker());
     }
 
     pub fn poll_delay(&mut self, stamp: Instant) -> Duration {
-        self.iface.iface.poll_delay(stamp, &self.iface.socketset).unwrap_or(Duration::from_millis(5)).min(Duration::from_millis(300))
+        self.iface.iface.poll_delay(stamp, &self.iface.socketset).unwrap_or(Duration::from_millis(10)).min(Duration::from_millis(500))
     }
 
     fn accept_stream(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<(TcpStream, SocketAddr, SocketAddr)>> {
@@ -263,11 +261,13 @@ impl Stream for TcpListener {
         
         
         match self.polled.poll_unpin(cx) {
-            Pending => { }
+            Pending => { 
+                if self.ref_waker.take().is_none() {
+                    self.iface_poll(cx);
+                };
+            }
             Ready(()) => {
-                self.iface_poll();
-                cx.waker().wake_by_ref();
-
+                self.iface_poll(cx);
             }
         }
         
@@ -309,21 +309,17 @@ impl AsyncWrite for TcpStream {
     }
 
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         Ready(Ok(()))
-        // Ready(
-        //     ready!(self.send_ch.as_mut().poll_flush(cx))
-        //         .map_err(|_| std::io::ErrorKind::BrokenPipe.into()),
-        // )
     }
 
     fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        // self.send_ch.close_channel();
+        self.send_ch.closed.load(Relaxed);
         Ready(Ok(()))
     }
 }
