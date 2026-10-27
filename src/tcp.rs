@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::{Pin, pin}, task::{
+    collections::HashMap, net::{Ipv4Addr, Ipv6Addr, SocketAddr}, pin::{Pin, pin}, sync::atomic::Ordering::Relaxed, task::{
         Poll::{Pending, Ready},
         ready,
     }
@@ -12,7 +12,7 @@ use futures::{
 use futures_timer::Delay;
 use ringbuf::traits::{Consumer, Observer, Producer as _};
 use smoltcp::{
-    iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
+    iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
 };
 
 use crate::{device::VirtualDevice, stack::IpPacket, transfer::{self, Reader, Writer}};
@@ -153,19 +153,21 @@ impl TcpListener {
         let timestamp = Instant::now();
         self.iface.poll(timestamp);
         let (sockets, socketset, removesockets) = self.rebain();
-        
+        let normalstate = [State::SynReceived, State::Established];
         for (handle, (send_tx, recv_rx)) in sockets.iter_mut() {
             let socket: &mut smoltcp::socket::tcp::Socket = socketset.get_mut(*handle);
-            // if socket.state() == State::Closed {
-            //     recv_rx.close();
-            //     send_tx.close_channel();
-            //     removesockets.push(*handle);
-            //     continue;
-            // }
-            // if send_tx.is_closed() {
-            //     socket.abort();
-            //     continue;
-            // }
+            
+            if send_tx.closed.load(Relaxed) {
+                
+                removesockets.push(*handle);
+                continue;
+            }
+            if !normalstate.contains(&socket.state()) {
+                send_tx.closed.store(true, Relaxed);
+                send_tx.wake();
+                removesockets.push(*handle);
+                continue;
+            }
 
             if socket.can_recv() {
                 if let Err(_) = socket.recv(|buf| {
