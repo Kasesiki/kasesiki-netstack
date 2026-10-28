@@ -11,10 +11,10 @@ use futures::{
 };
 use ringbuf::traits::{Consumer, Observer, Producer as _};
 use smoltcp::{
-    iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
+    iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::Instant, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
 };
 
-use crate::{device::VirtualDevice, stack::IpPacket, transfer::{self, Reader, Writer}};
+use crate::{Duration, device::VirtualDevice, stack::IpPacket, transfer::{self, Reader, Writer}};
 
 struct Iface {
     pub iface: Interface,

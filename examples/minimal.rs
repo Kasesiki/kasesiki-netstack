@@ -9,7 +9,7 @@ pub struct Timer {
 }
 
 impl tcp::Timer for Timer {
-    fn reset(&mut self, dur: smoltcp::time::Duration) {
+    fn reset(&mut self, dur: netstack_smoltcp::Duration) {
         self.inner.as_mut().reset(Instant::now() + dur.into());
     }
 }
