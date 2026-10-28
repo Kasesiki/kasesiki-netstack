@@ -6,8 +6,22 @@ In development.
 
 no runtime depend, high perfermance, easy useful.
 
-## Example
+## Supported
+- Tcp transport
 
+## Example
 see examples/minimal.rs
 
+## Features
 
+- no runtime depend, just use features and smoltcp crate, use ringbuf and bytes(zero copy)
+
+- Implements popular future streaming traitsand asynchronous IO traits for futures and tokio(optional).
+
+- user driven data updates and timer. just a future, no new thread.
+
+## Inspired By
+
+Special thanks to these amazing projects that inspired netstack-smoltcp (in no particular order):
+- [netstack-smoltcp](https://github.com/cavivie/netstack-smoltcp)
+- [smoltcp](https://github.com/smoltcp-rs/smoltcp)

@@ -9,7 +9,6 @@ use bytes::Bytes;
 use futures::{
     AsyncRead, AsyncWrite, FutureExt, Stream, channel::mpsc::{Receiver, SendError, Sender,}, task::AtomicWaker,
 };
-use futures_timer::Delay;
 use ringbuf::traits::{Consumer, Observer, Producer as _};
 use smoltcp::{
     iface::{Config, Interface, PollResult, SocketHandle, SocketSet}, phy::Device, socket::tcp::{SocketBuffer, State}, time::{Duration, Instant}, wire::{HardwareAddress, IpAddress, IpCidr, TcpPacket},
@@ -57,7 +56,11 @@ where
     Ok(iface)
 }
 
-pub struct TcpListener {
+pub trait Timer {
+    fn reset(&mut self, dur: Duration);
+}
+
+pub struct TcpListener<T> {
     tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
     smoltcp_tx: Sender<Bytes>,
     tcp_buffer_size: usize,
@@ -65,18 +68,20 @@ pub struct TcpListener {
     iface: Iface,
     sockets: HashMap<SocketHandle, (Writer, Reader)>,
     removesocket: Vec<SocketHandle>,
-    polled: futures_timer::Delay,
+    polled: T,
     ref_waker: Arc<AtomicWaker>,
 }
 
-impl TcpListener {
+impl<T: Timer + Future + Unpin> TcpListener<T> {
     pub fn new(
         mut device: VirtualDevice,
         tcp_rx: Receiver<IpPacket<Bytes>>,
         tcp_buffer_size: usize,
         smoltcp_tx: Sender<Bytes>,
-        ref_waker: Arc<AtomicWaker>
-    ) -> std::io::Result<Self> {
+        ref_waker: Arc<AtomicWaker>,
+        timer: T,
+    ) -> std::io::Result<Self>
+    where T: Timer + Future {
         let iface = create_interface(&mut device)?;
         let socketset = SocketSet::new(vec![]);
         Ok(TcpListener {
@@ -89,7 +94,7 @@ impl TcpListener {
                 device,
                 socketset,
             },
-            polled: Delay::new(std::time::Duration::from_millis(1)),
+            polled: timer,
             sockets: HashMap::new(),
             removesocket: vec![],
             ref_waker
@@ -238,7 +243,7 @@ impl TcpListener {
     }
 }
 
-impl Stream for TcpListener {
+impl<T: Future + Timer + Unpin> Stream for TcpListener<T> {
     type Item = (TcpStream, SocketAddr, SocketAddr);
 
     fn poll_next(
@@ -266,7 +271,7 @@ impl Stream for TcpListener {
                     self.iface_poll(cx);
                 };
             }
-            Ready(()) => {
+            Ready(_) => {
                 self.iface_poll(cx);
             }
         }

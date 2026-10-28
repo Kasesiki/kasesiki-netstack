@@ -1,14 +1,34 @@
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, pin::Pin, sync::Arc};
 
 use futures::{SinkExt, StreamExt, task::AtomicWaker};
-use netstack_smoltcp::stack::StackBuilder;
-use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}};
+use netstack_smoltcp::{stack::StackBuilder, tcp};
+use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}, time::{Instant, Sleep, sleep}};
 
+pub struct Timer {
+    inner: Pin<Box<Sleep>>,
+}
+
+impl tcp::Timer for Timer {
+    fn reset(&mut self, dur: smoltcp::time::Duration) {
+        self.inner.as_mut().reset(Instant::now() + dur.into());
+    }
+}
+
+impl Future for Timer {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let a = unsafe { self.map_unchecked_mut(|f| { &mut f.inner }) };
+        a.poll(cx)
+    }
+}
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let waker = Arc::new(AtomicWaker::new());
-    let (stack, mut _tcplistener) = StackBuilder::default().build(waker.clone())?;
+    let s = sleep(Instant::now().elapsed());
+
+    let (stack, mut _tcplistener) = StackBuilder::default().build(waker.clone(), Timer { inner: Box::pin(s) })?;
 
     let mut cfg = tun2::Configuration::default();
     cfg.layer(tun2::Layer::L3);

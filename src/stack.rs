@@ -10,7 +10,7 @@ use futures::{
 };
 use smoltcp::wire::{IpProtocol, IpVersion::self, Ipv4Packet, Ipv6Packet};
 
-use crate::{device::VirtualDevice, tcp::{TcpListener}};
+use crate::{device::VirtualDevice, tcp::{TcpListener, Timer}};
 
 pub struct StackBuilder {
     tcp_buffer_size: usize,
@@ -27,7 +27,7 @@ impl StackBuilder {
         }
     }
 
-    pub fn build(self, ref_waker: Arc<AtomicWaker>) -> std::io::Result<(Stack, TcpListener)> {
+    pub fn build<T: Future + Timer + Unpin>(self, ref_waker: Arc<AtomicWaker>, timer: T) -> std::io::Result<(Stack, TcpListener<T>)> {
         // 传入frame
         let (stack_tx, stack_rx) = mpsc::unbounded();
 
@@ -43,7 +43,7 @@ impl StackBuilder {
                 tcp_tx,
                 _udp_tx: udp_tx,
             },
-            TcpListener::new(device, tcp_rx, 0x3FFF * 20, handle_tx, ref_waker)?,
+            TcpListener::new(device, tcp_rx, 0x3FFF * 20, handle_tx, ref_waker, timer)?,
         ))
     }
 }
