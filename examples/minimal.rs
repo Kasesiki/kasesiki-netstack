@@ -3,7 +3,6 @@ use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
 use futures::{SinkExt, StreamExt, task::AtomicWaker};
 use netstack_smoltcp::stack::StackBuilder;
 use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}};
-use tokio_util::compat::FuturesAsyncReadCompatExt as _;
 
 
 #[tokio::main]
@@ -54,7 +53,7 @@ async fn main() -> std::io::Result<()> {
                 println!("new tcp connection: {:?} => {:?}", src, dst);
                 match new_tcp_stream(dst).await {
                     Ok(mut remote_stream) => {
-                        let _ = copy_bidirectional(&mut stream.compat(), &mut remote_stream).await;
+                        let _ = copy_bidirectional(&mut stream, &mut remote_stream).await;
                     }
                     Err(e) => println!(
                         "failed to new tcp stream {:?}=>{:?}, err: {:?}",

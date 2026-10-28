@@ -323,3 +323,38 @@ impl AsyncWrite for TcpStream {
         Ready(Ok(()))
     }
 }
+
+#[cfg(feature = "tokio")]
+impl tokio::io::AsyncRead for TcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let refbuf = buf.initialize_unfilled();
+        let n = ready!(self.recv_ch.pop_slice(cx, refbuf));
+        buf.advance(n);
+        Ready(Ok(()))
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl tokio::io::AsyncWrite for TcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let n = ready!(self.send_ch.push_slice(cx, buf));
+        Ready(Ok(n))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        self.send_ch.closed.store(true, Relaxed);
+        Ready(Ok(()))
+    }
+}
