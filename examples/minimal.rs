@@ -48,7 +48,7 @@ async fn main() -> std::io::Result<()> {
     });
 
     tokio::spawn(async move {
-        while let Some((stream, src, dst)) = _tcplistener.next().await {
+        while let Some((mut stream, src, dst)) = _tcplistener.next().await {
             tokio::spawn(async move {
                 println!("new tcp connection: {:?} => {:?}", src, dst);
                 match new_tcp_stream(dst).await {
