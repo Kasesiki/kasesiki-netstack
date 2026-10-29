@@ -7,7 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::{
-    AsyncRead, AsyncWrite, FutureExt, Stream, channel::mpsc::{Receiver, SendError, Sender,}, task::AtomicWaker,
+    AsyncRead, AsyncWrite, FutureExt, Stream, channel::mpsc::{SendError, Sender, UnboundedReceiver,}, task::AtomicWaker,
 };
 use ringbuf::traits::{Consumer, Observer, Producer as _};
 use smoltcp::{
@@ -61,22 +61,24 @@ pub trait Timer {
 }
 
 pub struct TcpListener<T> {
-    tcp_rx: Receiver<IpPacket<bytes::Bytes>>,
+    tcp_rx: UnboundedReceiver<IpPacket<bytes::Bytes>>,
     smoltcp_tx: Sender<Bytes>,
-    tcp_buffer_size: usize,
-    packet_cache: Option<(Bytes, Option<(std::net::SocketAddr, std::net::SocketAddr)>)>,
+    tcp_buffer_window: usize,
+    packet_cache: Option<(Bytes, Option<(std::net::SocketAddr, std::net::SocketAddr, smoltcp::socket::tcp::Socket<'static>)>)>,
     iface: Iface,
     sockets: HashMap<SocketHandle, (Writer, Reader)>,
     removesocket: Vec<SocketHandle>,
     polled: T,
     ref_waker: Arc<AtomicWaker>,
+    ded_handle: Vec<smoltcp::socket::tcp::Socket<'static>>,
 }
 
 impl<T: Timer + Future + Unpin> TcpListener<T> {
     pub fn new(
         mut device: VirtualDevice,
-        tcp_rx: Receiver<IpPacket<Bytes>>,
-        tcp_buffer_size: usize,
+        tcp_rx: UnboundedReceiver<IpPacket<Bytes>>,
+        tcp_buffer_max: usize,
+        tcp_buffer_window: usize,
         smoltcp_tx: Sender<Bytes>,
         ref_waker: Arc<AtomicWaker>,
         timer: T,
@@ -84,9 +86,18 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
     where T: Timer + Future {
         let iface = create_interface(&mut device)?;
         let socketset = SocketSet::new(vec![]);
+        let mut handles = vec![];
+        for _ in 0..tcp_buffer_max {
+            let mut socket = smoltcp::socket::tcp::Socket::new(
+                SocketBuffer::new( vec![0u8; tcp_buffer_window]),
+                SocketBuffer::new(vec![0u8; tcp_buffer_window]));
+            socket.set_keep_alive(Some(Duration::from_secs(28)));
+            socket.set_timeout(Some(Duration::from_secs(7200)));
+            handles.push(socket);
+        }
         Ok(TcpListener {
             tcp_rx,
-            tcp_buffer_size,
+            tcp_buffer_window,
             smoltcp_tx,
             packet_cache: None,
             iface: Iface {
@@ -97,7 +108,8 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
             polled: timer,
             sockets: HashMap::new(),
             removesocket: vec![],
-            ref_waker
+            ref_waker,
+            ded_handle: handles
         })
     }
 
@@ -115,7 +127,7 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
         &mut self,
         cx: &mut std::task::Context<'_>,
         packet: Bytes,
-        mut initdata: Option<(SocketAddr, SocketAddr)>,
+        mut initdata: Option<(SocketAddr, SocketAddr, smoltcp::socket::tcp::Socket<'static>)>,
     ) -> std::task::Poll<Result<(TcpStream, SocketAddr, SocketAddr), SendError>> {
         match self.smoltcp_tx.poll_ready(cx) {
             Ready(Err(e)) => {
@@ -124,18 +136,11 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
             Ready(Ok(())) => {
                 cx.waker().wake_by_ref();
                 self.smoltcp_tx.start_send(packet)?;
-                if let Some((src, dst)) = initdata.take() {
-                    let mut socket = smoltcp::socket::tcp::Socket::new(
-                        SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
-                        SocketBuffer::new(vec![0u8; self.tcp_buffer_size]),
-                    );
-                    socket.set_keep_alive(Some(Duration::from_secs(28)));
-                    socket.set_timeout(Some(Duration::from_secs(7200)));
+                if let Some((src, dst, mut socket)) = initdata.take() {
                     socket.listen(dst).unwrap();
 
-
-                    let (streamprob, streamcons) = transfer::transfer(0x3FFF * 20);
-                    let (socketprob, socketcons) = transfer::transfer(0x3FFF * 20);
+                    let (streamprob, streamcons) = transfer::transfer(self.tcp_buffer_window);
+                    let (socketprob, socketcons) = transfer::transfer(self.tcp_buffer_window);
 
                     let handle = self.iface.socketset.add(socket);
                     self.sockets.insert(handle, (socketprob, streamcons));
@@ -162,7 +167,6 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
             let socket: &mut smoltcp::socket::tcp::Socket = socketset.get_mut(*handle);
             
             if send_tx.closed.load(Relaxed) {
-                
                 removesockets.push(*handle);
                 continue;
             }
@@ -199,7 +203,10 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
 
         while let Some(handle) = self.removesocket.pop() {
             self.sockets.remove(&handle);
-            self.iface.socketset.remove(handle);
+            if let smoltcp::socket::Socket::Tcp(mut socket) = self.iface.socketset.remove(handle) {
+                socket.abort();
+                self.ded_handle.push(socket);
+            };
         }
         let du = self.poll_delay(timestamp);
         self.polled.reset(du.into());
@@ -228,9 +235,16 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
         let initpacket = packet.syn() && !packet.ack();
 
         let initdata = if initpacket {
-            let srcaddr = SocketAddr::new(src_addr, packet.src_port());
-            let dstaddr = SocketAddr::new(dst_addr, packet.dst_port());
-            Some((srcaddr, dstaddr))
+            if let Some(socket) = self.ded_handle.pop() {
+                let srcaddr = SocketAddr::new(src_addr, packet.src_port());
+                let dstaddr = SocketAddr::new(dst_addr, packet.dst_port());
+                Some((srcaddr, dstaddr, socket))
+            } else {
+                // wait timer
+                return Pending;
+            }
+
+            
         } else { None };
 
         match self.smoltcp_poll(cx, frame, initdata) {

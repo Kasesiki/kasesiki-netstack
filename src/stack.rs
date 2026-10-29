@@ -3,7 +3,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{channel::mpsc::Sender, task::AtomicWaker};
+use futures::{channel::mpsc::UnboundedSender, task::AtomicWaker};
 use futures::{
     Sink, Stream,
     channel::mpsc::{self, UnboundedReceiver},
@@ -13,16 +13,20 @@ use smoltcp::wire::{IpProtocol, IpVersion::self, Ipv4Packet, Ipv6Packet};
 use crate::{device::VirtualDevice, tcp::{TcpListener, Timer}};
 
 pub struct StackBuilder {
-    tcp_buffer_size: usize,
-    udp_buffer_size: usize,
+    // bandwidth = buffer_window / rtt
+    tcp_buffer_window: usize,
+    _udp_buffer_window: usize,
+    // Concurrent TCP Connections
+    tcp_buffer_max: usize,
     mtu: u16,
 }
 
 impl StackBuilder {
-    pub fn new(tcp_buffer_size: usize, udp_buffer_size: usize, mtu: u16) -> Self {
+    pub fn new(tcp_buffer_max: usize, tcp_buffer_window: usize, _udp_buffer_window: usize, mtu: u16) -> Self {
         Self {
-            tcp_buffer_size,
-            udp_buffer_size,
+            tcp_buffer_max,
+            tcp_buffer_window,
+            _udp_buffer_window,
             mtu,
         }
     }
@@ -31,8 +35,8 @@ impl StackBuilder {
         // 传入frame
         let (stack_tx, stack_rx) = mpsc::unbounded();
 
-        let (tcp_tx, tcp_rx) = mpsc::channel(self.tcp_buffer_size);
-        let (udp_tx, _udp_rx) = mpsc::channel(self.udp_buffer_size);
+        let (tcp_tx, tcp_rx) = mpsc::unbounded();
+        let (udp_tx, _udp_rx) = mpsc::unbounded();
 
         let (device, handle_tx) = VirtualDevice::new(stack_tx, self.mtu.into());
 
@@ -43,7 +47,7 @@ impl StackBuilder {
                 tcp_tx,
                 _udp_tx: udp_tx,
             },
-            TcpListener::new(device, tcp_rx, 0x3FFF * 20, handle_tx, ref_waker, timer)?,
+            TcpListener::new(device, tcp_rx, self.tcp_buffer_max, self.tcp_buffer_window, handle_tx, ref_waker, timer)?,
         ))
     }
 }
@@ -51,8 +55,9 @@ impl StackBuilder {
 impl Default for StackBuilder {
     fn default() -> Self {
         Self {
-            tcp_buffer_size: 64,
-            udp_buffer_size: 64,
+            tcp_buffer_max: 128,
+            tcp_buffer_window: 0x3FFF * 20,
+            _udp_buffer_window: 0x3FFF * 20,
             mtu: 1500,
         }
     }
@@ -111,8 +116,8 @@ where
 pub struct Stack {
     sink_buf: Option<IpPacket<Bytes>>,
     stack_rx: Pin<Box<UnboundedReceiver<Bytes>>>,
-    tcp_tx: Sender<IpPacket<bytes::Bytes>>,
-    _udp_tx: Sender<IpPacket<bytes::Bytes>>,
+    tcp_tx: UnboundedSender<IpPacket<bytes::Bytes>>,
+    _udp_tx: UnboundedSender<IpPacket<bytes::Bytes>>,
 }
 
 impl Stack {
