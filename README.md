@@ -1,6 +1,6 @@
 # Netstack smoltcp by Kasesiki
 
-英文|[中文](https://github.com/Kasesiki/netstack-smoltcp/README_CN.md)
+英文|[中文](https://github.com/Kasesiki/netstack-smoltcp/blob/main/README_CN.md)
 
 A netstack for the special purpose of turning packets from/to a TUN interface into TCP streams and UDP packets. It uses smoltcp-rs as the backend netstack.
 
