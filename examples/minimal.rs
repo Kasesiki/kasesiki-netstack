@@ -1,7 +1,7 @@
 use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, pin::Pin, sync::Arc};
 
 use futures::{SinkExt, StreamExt, task::AtomicWaker};
-use netstack_smoltcp::{stack::StackBuilder, tcp};
+use kasesiki_netstack::{stack::StackBuilder, tcp};
 use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}, time::{Instant, Sleep, sleep}};
 
 pub struct Timer {
@@ -9,7 +9,7 @@ pub struct Timer {
 }
 
 impl tcp::Timer for Timer {
-    fn reset(&mut self, dur: netstack_smoltcp::Duration) {
+    fn reset(&mut self, dur: kasesiki_netstack::Duration) {
         self.inner.as_mut().reset(Instant::now() + dur.into());
     }
 }

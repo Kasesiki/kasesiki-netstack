@@ -203,10 +203,9 @@ impl<T: Timer + Future + Unpin> TcpListener<T> {
 
         while let Some(handle) = self.removesocket.pop() {
             self.sockets.remove(&handle);
-            if let smoltcp::socket::Socket::Tcp(mut socket) = self.iface.socketset.remove(handle) {
-                socket.abort();
-                self.ded_handle.push(socket);
-            };
+            let smoltcp::socket::Socket::Tcp(mut socket) = self.iface.socketset.remove(handle);
+            socket.abort();
+            self.ded_handle.push(socket);
         }
         let du = self.poll_delay(timestamp);
         self.polled.reset(du.into());

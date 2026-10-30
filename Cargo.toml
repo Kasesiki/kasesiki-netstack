@@ -1,14 +1,42 @@
 [package]
-name = "netstack-smoltcp"
+name = "kasesiki-netstack"
 version = "0.1.0"
 edition = "2024"
+authors = ["kasesiki <shizheqwq@gmail.com>"]
+description = """A netstack for the special purpose of turning packets from/to a TUN interface into TCP streams and UDP packets. It uses smoltcp-rs as the backend netstack."""
+homepage = "https://github.com/Kasesiki/kasesiki-netstack"
+readme = "README.md"
+documentation = "https://docs.rs/kasesiki-netstack"
+keywords = [
+    "netstack",
+    "smoltcp",
+    "network",
+    "ip",
+    "tun",
+]
+license = "Apache-2.0"
+repository = "https://github.com/Kasesiki/kasesiki-netstack"
+categories = ["network-programming"]
 
 [dependencies]
 bytes = "1.12.1"
 futures = { version = "0.3.34", default-features = false, features = ["alloc", "std"] }
 ringbuf = "0.5.3"
-smoltcp = "0.14.0"
 tokio = { version = "1.53", default-features = false, optional = true }
+
+[dependencies.smoltcp]
+version = "0.14"
+features = [
+    "std",
+    "log",
+    "medium-ip",
+    "proto-ipv4",
+    "proto-ipv6",
+    #"socket-icmp",
+    #"socket-udp",
+    "socket-tcp",
+]
+default-features = false
 
 [features]
 default = []
