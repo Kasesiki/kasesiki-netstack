@@ -1,16 +1,24 @@
 use std::{
-    io::{Error, ErrorKind::InvalidInput}, net::IpAddr, ops::Range, pin::Pin, sync::Arc, task::{Poll::Ready, ready},
+    io::{Error, ErrorKind::InvalidInput},
+    net::IpAddr,
+    ops::Range,
+    pin::Pin,
+    sync::Arc,
+    task::{Poll::Ready, ready},
 };
 
 use bytes::Bytes;
-use futures::{channel::mpsc::UnboundedSender, task::AtomicWaker};
 use futures::{
     Sink, Stream,
     channel::mpsc::{self, UnboundedReceiver},
 };
-use smoltcp::wire::{IpProtocol, IpVersion::self, Ipv4Packet, Ipv6Packet};
+use futures::{channel::mpsc::UnboundedSender, task::AtomicWaker};
+use smoltcp::wire::{IpProtocol, IpVersion, Ipv4Packet, Ipv6Packet};
 
-use crate::{device::VirtualDevice, tcp::{TcpListener, Timer}};
+use crate::{
+    device::VirtualDevice,
+    tcp::{TcpListener, Timer},
+};
 
 pub struct StackBuilder {
     // bandwidth = buffer_window / rtt
@@ -22,7 +30,12 @@ pub struct StackBuilder {
 }
 
 impl StackBuilder {
-    pub fn new(tcp_buffer_max: usize, tcp_buffer_window: usize, _udp_buffer_window: usize, mtu: u16) -> Self {
+    pub fn new(
+        tcp_buffer_max: usize,
+        tcp_buffer_window: usize,
+        _udp_buffer_window: usize,
+        mtu: u16,
+    ) -> Self {
         Self {
             tcp_buffer_max,
             tcp_buffer_window,
@@ -31,7 +44,11 @@ impl StackBuilder {
         }
     }
 
-    pub fn build<T: Future + Timer + Unpin>(self, ref_waker: Arc<AtomicWaker>, timer: T) -> std::io::Result<(Stack, TcpListener<T>)> {
+    pub fn build<T: Future + Timer + Unpin>(
+        self,
+        ref_waker: Arc<AtomicWaker>,
+        timer: T,
+    ) -> std::io::Result<(Stack, TcpListener<T>)> {
         // 传入frame
         let (stack_tx, stack_rx) = mpsc::unbounded();
 
@@ -47,7 +64,15 @@ impl StackBuilder {
                 tcp_tx,
                 _udp_tx: udp_tx,
             },
-            TcpListener::new(device, tcp_rx, self.tcp_buffer_max, self.tcp_buffer_window, handle_tx, ref_waker, timer)?,
+            TcpListener::new(
+                device,
+                tcp_rx,
+                self.tcp_buffer_max,
+                self.tcp_buffer_window,
+                handle_tx,
+                ref_waker,
+                timer,
+            )?,
         ))
     }
 }
@@ -73,7 +98,6 @@ where
     T: AsRef<[u8]>,
 {
     pub fn protocol(&self) -> IpProtocol {
-        
         match *self {
             IpPacket::Ipv4(ref packet) => packet.next_header(),
             IpPacket::Ipv6(ref packet) => packet.next_header(),
@@ -103,12 +127,8 @@ where
 
     pub fn size(&self) -> Range<usize> {
         match *self {
-            IpPacket::Ipv4(ref packet) => {
-                packet.header_len() as usize..packet.total_len() as usize
-            },
-            IpPacket::Ipv6(ref packet) => {
-                packet.header_len() as usize..packet.total_len() as usize
-            },
+            IpPacket::Ipv4(ref packet) => packet.header_len() as usize..packet.total_len() as usize,
+            IpPacket::Ipv6(ref packet) => packet.header_len() as usize..packet.total_len() as usize,
         }
     }
 }
@@ -134,8 +154,8 @@ impl Stack {
             //IpProtocol::Udp => &mut self.udp_tx,
             _ => {
                 //println!("ignore unknown protocol: {a}");
-                return std::task::Poll::Ready(Ok(()))
-            },
+                return std::task::Poll::Ready(Ok(()));
+            }
         };
         if let Err(e) = ready!(tx.poll_ready(cx)) {
             unsafe { Pin::get_unchecked_mut(self).sink_buf.replace(proto) };
@@ -161,9 +181,9 @@ impl Sink<Bytes> for Stack {
     }
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
-        let packet = match IpVersion::of_packet(&item).map_err(|err| {
-                    Error::new(InvalidInput, format!("invalid IP packet: {err}"))
-                })? {
+        let packet = match IpVersion::of_packet(&item)
+            .map_err(|err| Error::new(InvalidInput, format!("invalid IP packet: {err}")))?
+        {
             IpVersion::Ipv4 => {
                 IpPacket::Ipv4(Ipv4Packet::new_checked(item).map_err(|err| {
                     Error::new(InvalidInput, format!("invalid IPv4 packet: {err}"))

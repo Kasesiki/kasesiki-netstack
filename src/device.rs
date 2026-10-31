@@ -47,7 +47,9 @@ impl Device for VirtualDevice {
     }
 
     fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
-        Some(Self::TxToken { permit: self.out_buf.clone() })
+        Some(Self::TxToken {
+            permit: self.out_buf.clone(),
+        })
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {

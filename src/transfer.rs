@@ -1,7 +1,18 @@
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering::Relaxed}}, task::Poll::{self, Ready}};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    },
+    task::Poll::{self, Ready},
+};
 
 use futures::task::AtomicWaker;
-use ringbuf::{SharedRb, storage::Heap, traits::{Consumer, Producer, Split}, wrap::caching::Caching};
+use ringbuf::{
+    SharedRb,
+    storage::Heap,
+    traits::{Consumer, Producer, Split},
+    wrap::caching::Caching,
+};
 
 pub struct Reader {
     pub inner: Caching<Arc<SharedRb<Heap<u8>>>, false, true>,
@@ -12,7 +23,6 @@ pub struct Reader {
 
 impl Reader {
     pub fn pop_slice(&mut self, cx: &mut std::task::Context<'_>, elems: &mut [u8]) -> Poll<usize> {
-
         let n = self.inner.pop_slice(elems);
         if n == 0 {
             if self.closed.load(Relaxed) {
@@ -25,7 +35,7 @@ impl Reader {
                 return Poll::Pending;
             }
         }
-        
+
         Ready(n)
     }
 
@@ -36,6 +46,7 @@ impl Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
+        self.inner.clear();
         self.closed.store(true, Relaxed);
     }
 }
@@ -84,5 +95,18 @@ pub fn transfer(heap_size: usize) -> (Writer, Reader) {
     let recvwaker = Arc::new(AtomicWaker::new());
     let sendwaker = Arc::new(AtomicWaker::new());
     let closed = Arc::new(AtomicBool::new(false));
-    (Writer { inner: w, recvwaker: recvwaker.clone(), sendwaker: sendwaker.clone(), closed: closed.clone() }, Reader { inner: r, recvwaker, sendwaker, closed })
+    (
+        Writer {
+            inner: w,
+            recvwaker: recvwaker.clone(),
+            sendwaker: sendwaker.clone(),
+            closed: closed.clone(),
+        },
+        Reader {
+            inner: r,
+            recvwaker,
+            sendwaker,
+            closed,
+        },
+    )
 }

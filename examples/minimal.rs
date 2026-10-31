@@ -1,8 +1,16 @@
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, pin::Pin, sync::Arc};
+use std::{
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    pin::Pin,
+    sync::Arc,
+};
 
 use futures::{SinkExt, StreamExt, task::AtomicWaker};
 use kasesiki_netstack::{stack::StackBuilder, tcp};
-use tokio::{io::copy_bidirectional, net::{TcpSocket, TcpStream}, time::{Instant, Sleep, sleep}};
+use tokio::{
+    io::copy_bidirectional,
+    net::{TcpSocket, TcpStream},
+    time::{Instant, Sleep, sleep},
+};
 
 pub struct Timer {
     inner: Pin<Box<Sleep>>,
@@ -17,8 +25,11 @@ impl tcp::Timer for Timer {
 impl Future for Timer {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        let a = unsafe { self.map_unchecked_mut(|f| { &mut f.inner }) };
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let a = unsafe { self.map_unchecked_mut(|f| &mut f.inner) };
         a.poll(cx)
     }
 }
@@ -28,7 +39,8 @@ async fn main() -> std::io::Result<()> {
     let waker = Arc::new(AtomicWaker::new());
     let s = sleep(Instant::now().elapsed());
 
-    let (stack, mut _tcplistener) = StackBuilder::default().build(waker.clone(), Timer { inner: Box::pin(s) })?;
+    let (stack, mut _tcplistener) =
+        StackBuilder::default().build(waker.clone(), Timer { inner: Box::pin(s) })?;
 
     let mut cfg = tun2::Configuration::default();
     cfg.layer(tun2::Layer::L3);
@@ -87,7 +99,6 @@ async fn main() -> std::io::Result<()> {
     let _ = tokio::join!(a, b);
 
     Ok(())
-    
 }
 
 async fn new_tcp_stream<'a>(addr: SocketAddr) -> std::io::Result<TcpStream> {
@@ -97,7 +108,10 @@ async fn new_tcp_stream<'a>(addr: SocketAddr) -> std::io::Result<TcpStream> {
     socket.set_nonblocking(true)?;
 
     let stream = TcpSocket::from_std_stream(socket.into())
-        .connect(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), addr.port())))
+        .connect(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(127, 0, 0, 1),
+            addr.port(),
+        )))
         .await?;
 
     Ok(stream)
